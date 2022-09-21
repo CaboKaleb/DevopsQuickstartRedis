@@ -1,0 +1,82 @@
+name: $(Date:dd.MM.yyyy)$(rev:.r)
+trigger: none
+pr: none
+parameters:
+  - name: environment
+    displayName: Which Environment to deploy?
+    type: string
+    default: 'dev'
+    values:
+    - dev
+    - test
+    - pre
+    - qa
+    - prod
+variables:
+  - group: Variables
+  - name: environment
+    value: ${{ parameters.environment }}
+  - name: resourceGroupName
+    value: ${{ format('dc9-spcom-{0}-sc-rg', parameters.environment) }}
+  - name: keyvaultName
+    value: ${{ format('dc9-spcom-{0}-deploy-kv', parameters.environment) }}
+  - name: redisCacheName
+    value: ${{ format('dc9-spcom-{0}-redis', parameters.environment) }}
+  - name: sqlParameterFile
+    value: ${{ format( '/Azure/templates/sql/deploy-sql-{0}.parameters.json', parameters.environment) }}
+stages:
+  - stage: InitDeploy
+    dependsOn: []
+    jobs:
+    - job: Build
+      displayName: ☁ Azure artifacts
+      pool:
+        vmImage: ubuntu-latest
+      steps:
+        - task: PublishPipelineArtifact@1
+          displayName: 🚢 Publish Azure Artifact
+          inputs:
+            targetPath: '$(System.DefaultWorkingDirectory)/azure'
+            artifactName: Azure
+    - deployment: DeployEDS
+      displayName: Deploy external data services
+      dependsOn: Build
+      pool:
+        vmImage: windows-latest
+      environment: ${{variables.environment}}
+      strategy:
+        runOnce:
+          deploy:
+            steps:
+            - download: current
+              artifact: Azure
+            - task: AzureResourceManagerTemplateDeployment@3
+              displayName: 'Deploy SQL'
+              inputs:
+                azureResourceManagerConnection: '$(azureServiceConnection)'
+                subscriptionId: '$(azureSubscriptionId)'
+                resourceGroupName: '$(resourceGroupName)'
+                location: '$(location)'
+                csmFile: '$(Pipeline.Workspace)/Azure/templates/sql/deploy-sql.json'
+                csmParametersFile: '$(Pipeline.Workspace)$(sqlParameterFile)'
+                overrideParameters: '-deploymentId "${{variables.environment}}"'
+                deploymentMode: 'Incremental'
+                deploymentName: SQL
+            - task: AzureResourceManagerTemplateDeployment@3
+              displayName: 'Deploy Redis'
+              inputs:
+                azureResourceManagerConnection: '$(azureServiceConnection)'
+                subscriptionId: '$(azureSubscriptionId)'
+                resourceGroupName: '$(resourceGroupName)'
+                location: '$(location)'
+                csmFile: '$(Pipeline.Workspace)/Azure/templates/redis/deploy-redis.json'
+                overrideParameters: '-redisCacheName "${{variables.redisCacheName}}"'
+                deploymentMode: 'Incremental'
+                deploymentName: Redis 
+            - task: AzurePowerShell@5
+              displayName: 'Update Redis connection string in KeyVault'
+              inputs:
+                azureSubscription: '$(azureServiceConnection)'
+                ScriptPath: '$(Pipeline.Workspace)/Azure/scripts/update-redis-akv-secret.ps1'
+                ScriptArguments: '-resourceGroupName "$(resourceGroupName)" -redisCacheName "$(redisCacheName)" -vaultName "$(keyvaultName)"'
+                azurePowerShellVersion: LatestVersion
